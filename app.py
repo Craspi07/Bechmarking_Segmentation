@@ -637,9 +637,10 @@ with tab4:
                 if model_source == "Built-in pretrained model":
                     builtin_model_name = st.selectbox(
                         "Pretrained model name",
-                        ["cpsam_v2", "cyto3", "cyto2", "cyto", "nuclei", "cpdino"],
-                        help="Exact names available depend on your installed Cellpose version. "
-                        "'cpsam_v2' is the current default (Cellpose-SAM) model as of Cellpose >= 4.",
+                        ["cpsam_v2", "cpsam", "cpdino", "cpdino-vitb"],
+                        help="Names valid for Cellpose >= 4 (the Cellpose-SAM generation this app targets). "
+                        "'cpsam_v2' is the current general-purpose default. If you've pinned an older Cellpose "
+                        "(2.x/3.x) yourself, its model names (e.g. 'cyto3', 'nuclei') won't work here.",
                     )
                     custom_model_file = None
                 else:
@@ -650,6 +651,31 @@ with tab4:
                 flow_threshold = st.slider("Flow threshold", 0.0, 3.0, 0.4, 0.05)
                 cellprob_threshold = st.slider("Cell probability threshold", -6.0, 6.0, 0.0, 0.5)
                 use_gpu = st.checkbox("Use GPU if available", value=False)
+                if st.button("Check GPU availability", key="cp_check_gpu"):
+                    try:
+                        import torch
+                    except ImportError:
+                        st.error("PyTorch is not installed (it should come with Cellpose). Reinstall via `pip install cellpose`.")
+                    else:
+                        cuda_ok = torch.cuda.is_available()
+                        mps_ok = bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
+                        st.caption(f"PyTorch {torch.__version__}")
+                        if cuda_ok:
+                            st.success(f"CUDA GPU detected: {torch.cuda.get_device_name(0)}")
+                        elif mps_ok:
+                            st.success("Apple Metal (MPS) GPU detected.")
+                        else:
+                            st.warning(
+                                "No GPU detected by PyTorch -- Cellpose will silently run on CPU regardless of the "
+                                "checkbox above (it does not raise an error, it just falls back). Common causes: "
+                                "no NVIDIA/Apple GPU present, missing or outdated GPU drivers, or a CPU-only "
+                                "PyTorch build got installed (a version string ending in '+cpu' means no CUDA "
+                                "support -- this one is "
+                                f"'{torch.__version__}'). To fix, install a CUDA-matched PyTorch build from "
+                                "https://pytorch.org/get-started/locally/ into this project's `.venv` "
+                                "(e.g. `pip install torch --index-url https://download.pytorch.org/whl/cu121`, "
+                                "matching your NVIDIA driver) before `pip install cellpose`."
+                            )
 
             if st.button("Run Cellpose segmentation on synthetic image"):
                 try:
@@ -672,7 +698,28 @@ with tab4:
                                         fh.write(custom_model_file.getvalue())
                                     model = cellpose_models.CellposeModel(gpu=use_gpu, pretrained_model=tmp_path)
                                 else:
-                                    model = cellpose_models.CellposeModel(gpu=use_gpu, model_type=builtin_model_name)
+                                    model = cellpose_models.CellposeModel(gpu=use_gpu, pretrained_model=builtin_model_name)
+
+                                # Cellpose resolves `gpu=True` against what PyTorch can actually see and silently
+                                # falls back to CPU if no usable CUDA/MPS device is found -- it never raises an
+                                # error for this, so report the *actual* resolved device instead of trusting the
+                                # checkbox. model.gpu / model.device reflect what really happened.
+                                if use_gpu and not model.gpu:
+                                    st.warning(
+                                        f"GPU was requested but Cellpose is running on **{model.device}** instead. "
+                                        "Use the 'Check GPU availability' button above to see why."
+                                    )
+                                elif model.gpu:
+                                    st.success(f"Running on GPU: **{model.device}**")
+
+                                if model_source == "Built-in pretrained model":
+                                    resolved_name = os.path.basename(str(model.pretrained_model))
+                                    if resolved_name != builtin_model_name:
+                                        st.info(
+                                            f"Requested model '{builtin_model_name}' -- Cellpose actually resolved "
+                                            f"to **{resolved_name}** (falls back to the default if a name isn't "
+                                            "recognized by your installed Cellpose version)."
+                                        )
 
                                 diam = None if diameter_px == 0 else float(diameter_px)
                                 masks_out, _flows_out, _styles_out = model.eval(
