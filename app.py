@@ -18,15 +18,20 @@ instance each).
 """
 from __future__ import annotations
 
+import io
+import os
+import tempfile
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import tifffile
 from skimage.color import label2rgb
 from skimage.measure import regionprops
 
-from modules import io_utils, morphology, snr_utils, stats_utils, synthetic
+from modules import io_utils, morphology, snr_utils, stats_utils, synthetic, viz_utils
 
 st.set_page_config(page_title="Segmentation QC Benchmark", page_icon="🔬", layout="wide")
 
@@ -76,6 +81,62 @@ def _load_and_reduce(uploaded_file, label_prefix: str, is_label_mask: bool = Fal
         axis_len = array.shape[-1] if method == "channel_last_index" else array.shape[0]
         index = st.sidebar.number_input(f"{label_prefix} index", 0, max(axis_len - 1, 0), 0, key=f"{label_prefix}_idx2")
     return io_utils.reduce_to_2d(array, method, int(index))
+
+
+def _tiff_bytes(array: np.ndarray) -> bytes:
+    """Serialize a numpy array to TIFF bytes for st.download_button."""
+    buffer = io.BytesIO()
+    tifffile.imwrite(buffer, array)
+    return buffer.getvalue()
+
+
+def render_object_inspector(raw_img_local, mask_img_local, df, key_prefix, default_label=None):
+    """Let the user pick an object label from ``df`` and see exactly where
+    it sits in the full image, plus a zoomed, mask-overlaid crop -- so a
+    flagged/suspicious object can be visually judged against the raw data
+    instead of trusting the numbers alone.
+    """
+    if df.empty or "label" not in df.columns:
+        st.info("No objects available to inspect.")
+        return
+
+    labels_sorted = sorted(int(l) for l in df["label"].tolist())
+    default_index = labels_sorted.index(int(default_label)) if default_label in labels_sorted else 0
+    selected_label = st.selectbox(
+        "Select object label to inspect", labels_sorted, index=default_index, key=f"{key_prefix}_inspect_label"
+    )
+
+    bbox = viz_utils.object_bbox(mask_img_local, selected_label, pad=20)
+    if bbox is None:
+        st.warning("Selected object was not found in the mask.")
+        return
+    r0, c0, r1, c1 = bbox
+    mask_crop = mask_img_local[r0:r1, c0:c1]
+    highlight = (mask_crop == selected_label).astype(np.int32)
+
+    if raw_img_local is not None:
+        full_display = io_utils.normalize_for_display(raw_img_local)
+        crop_display = io_utils.normalize_for_display(raw_img_local[r0:r1, c0:c1])
+        full_title = f"Full raw image -- object {selected_label} location"
+    else:
+        # No raw image available (mask-only mode): fall back to a binary
+        # foreground map so the object can still be located spatially.
+        full_display = np.where(mask_img_local > 0, 255, 0).astype(np.uint8)
+        crop_display = np.where(mask_crop > 0, 255, 0).astype(np.uint8)
+        full_title = f"Full mask footprint -- object {selected_label} location"
+
+    full_fig = px.imshow(full_display, color_continuous_scale="gray", title=full_title)
+    full_fig.add_shape(type="rect", x0=c0, y0=r0, x1=c1, y1=r1, line=dict(color="red", width=2))
+    st.plotly_chart(full_fig, width="stretch")
+
+    overlay = label2rgb(highlight, image=crop_display, bg_label=0, alpha=0.5, colors=["red"])
+    crop_col1, crop_col2 = st.columns(2)
+    with crop_col1:
+        st.plotly_chart(px.imshow(crop_display, color_continuous_scale="gray", title="Zoomed crop"), width="stretch")
+    with crop_col2:
+        st.plotly_chart(px.imshow(overlay, title=f"Object {selected_label} highlighted"), width="stretch")
+
+    st.dataframe(df[df["label"] == selected_label], width="stretch")
 
 
 raw_img, mask_img = None, None
@@ -273,11 +334,28 @@ with tab2:
                 st.plotly_chart(fig, width="stretch")
 
             st.subheader("Automated outlier detection")
-            st.caption(
-                "'Potential merge' = unusually large area + low circularity (touching cells segmented as one). "
-                "'Potential fragment' = area near the bottom of the population's size distribution (over-segmentation "
-                "or spurious tiny detections)."
-            )
+
+            with st.expander("What do 'Potential merge' and 'Potential fragment' mean?"):
+                st.markdown(
+                    f"""
+**Potential merge** -- the object's area is a statistical outlier (robust z-score above the sidebar's
+*Area robust z-score threshold*, currently **{area_z_thresh:.1f}**) **and** its circularity is below the
+*Circularity threshold* (currently **{circularity_thresh:.2f}**). This is the classic signature of two
+touching/overlapping cells segmented as a single blob: real cells tend to be fairly round, so an object
+that is both unusually large **and** irregularly shaped is suspicious.
+
+**Potential fragment** -- the object's area falls at or below the sidebar's *Small-object percentile*
+cutoff (currently the smallest **{small_area_pct}%** of detected objects by area). This flag does **not**
+automatically mean the object is wrong -- it can indicate any of:
+1. **Over-segmentation / splitting** -- a single real object was incorrectly cut into multiple smaller pieces.
+2. **Spurious detection** -- noise, debris, or an imaging artifact was picked up as if it were a real object.
+3. **A genuinely small, valid object** in a population that has a wide natural size range.
+
+Use the object inspector below to zoom into a flagged object on the raw image and judge which case applies --
+statistics alone can't tell these three apart.
+                    """
+                )
+
             n_merge = int((flagged_df["flag"] == "Potential merge").sum())
             n_fragment = int((flagged_df["flag"] == "Potential fragment").sum())
             m1, m2, m3 = st.columns(3)
@@ -295,6 +373,10 @@ with tab2:
                     "text/csv",
                 )
 
+            st.subheader("Trace an object back to the original image")
+            default_lbl = int(suspicious["label"].iloc[0]) if not suspicious.empty else int(flagged_df["label"].iloc[0])
+            render_object_inspector(raw_img, mask_img, flagged_df, "tab2", default_label=default_lbl)
+
 # ===========================================================================
 # TAB 3 -- Signal-to-Noise & Contrast Ratio Validation
 # ===========================================================================
@@ -310,6 +392,13 @@ with tab3:
         else:
             st.subheader("Per-object SBR / SNR table")
             st.dataframe(snr_df, width="stretch")
+
+            st.subheader("Trace an object back to the original image")
+            valid_snr = snr_df.dropna(subset=["SNR"])
+            default_lbl = (
+                int(valid_snr.sort_values("SNR").iloc[0]["label"]) if not valid_snr.empty else int(snr_df["label"].iloc[0])
+            )
+            render_object_inspector(raw_img, mask_img, snr_df, "tab3", default_label=default_lbl)
 
             col1, col2 = st.columns(2)
             with col1:
@@ -426,53 +515,153 @@ with tab4:
             gt_overlay = label2rgb(synth_gt, image=io_utils.normalize_for_display(synth_raw), bg_label=0, alpha=0.4)
             st.plotly_chart(px.imshow(gt_overlay, title=f"Ground truth ({n_gt} objects)"), width="stretch")
 
-        dl1, dl2 = st.columns(2)
+        st.caption("Download the synthetic data to run through an external pipeline, or segment it in-app below.")
+        dl1, dl2, dl3, dl4 = st.columns(4)
         with dl1:
             st.download_button(
-                "Download synthetic raw image (.npy)", io_utils.array_to_npy_bytes(synth_raw), "synthetic_raw.npy"
+                "Raw image (.npy)", io_utils.array_to_npy_bytes(synth_raw), "synthetic_raw.npy", key="dl_raw_npy"
             )
         with dl2:
             st.download_button(
-                "Download ground-truth mask (.npy)", io_utils.array_to_npy_bytes(synth_gt), "synthetic_ground_truth.npy"
+                "Raw image (.tif)", _tiff_bytes(synth_raw.astype(np.float32)), "synthetic_raw.tif",
+                "image/tiff", key="dl_raw_tif",
+            )
+        with dl3:
+            st.download_button(
+                "Ground truth (.npy)", io_utils.array_to_npy_bytes(synth_gt), "synthetic_ground_truth.npy", key="dl_gt_npy"
+            )
+        with dl4:
+            st.download_button(
+                "Ground truth (.tif)", _tiff_bytes(synth_gt.astype(np.int32)), "synthetic_ground_truth.tif",
+                "image/tiff", key="dl_gt_tif",
             )
 
         st.subheader("Evaluate a predicted mask against this ground truth")
-        st.caption("Run your segmentation pipeline on the downloaded raw image, then upload its predicted mask here.")
-        pred_file = st.file_uploader(
-            "Predicted mask for the synthetic image (TIFF or .npy)", type=["tif", "tiff", "npy"], key="synth_pred_upload"
+        eval_source = st.radio(
+            "Prediction source", ["Upload a predicted mask", "Run Cellpose in-app"], horizontal=True, key="synth_eval_source"
         )
-        if pred_file is not None:
-            pred_mask = io_utils.load_array_from_upload(pred_file)
-            if pred_mask.ndim != 2:
-                pred_mask = io_utils.reduce_to_2d(pred_mask, "first_axis_index", 0)
 
-            if pred_mask.shape != synth_gt.shape:
-                st.error(f"Predicted mask shape {pred_mask.shape} does not match synthetic image shape {synth_gt.shape}.")
-            else:
-                eval_df = synthetic.evaluate_against_ground_truth(synth_gt, pred_mask.astype(np.int32))
-                st.dataframe(eval_df, width="stretch")
+        pred_mask_for_eval = None
 
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=eval_df["iou_threshold"], y=eval_df["AP"], name="AP", mode="lines+markers"))
-                fig.add_trace(
-                    go.Scatter(x=eval_df["iou_threshold"], y=eval_df["precision"], name="Precision", mode="lines+markers")
+        if eval_source == "Upload a predicted mask":
+            st.caption("Run your segmentation pipeline on the downloaded raw image, then upload its predicted mask here.")
+            pred_file = st.file_uploader(
+                "Predicted mask for the synthetic image (TIFF or .npy)", type=["tif", "tiff", "npy"], key="synth_pred_upload"
+            )
+            if pred_file is not None:
+                pred_mask = io_utils.load_array_from_upload(pred_file)
+                if pred_mask.ndim != 2:
+                    pred_mask = io_utils.reduce_to_2d(pred_mask, "first_axis_index", 0)
+                if pred_mask.shape != synth_gt.shape:
+                    st.error(f"Predicted mask shape {pred_mask.shape} does not match synthetic image shape {synth_gt.shape}.")
+                else:
+                    pred_mask_for_eval = pred_mask.astype(np.int32)
+
+        else:
+            st.caption(
+                "Run a Cellpose model directly on the synthetic image -- either a built-in pretrained model or your "
+                "own trained model file -- then immediately QC-check the result against the exact synthetic ground truth."
+            )
+            cp1, cp2 = st.columns(2)
+            with cp1:
+                model_source = st.radio(
+                    "Model source", ["Built-in pretrained model", "Upload a custom-trained model"], key="cp_model_source"
                 )
-                fig.add_trace(
-                    go.Scatter(
-                        x=eval_df["iou_threshold"], y=eval_df["recall"], name="Recall (detection rate)", mode="lines+markers"
+                if model_source == "Built-in pretrained model":
+                    builtin_model_name = st.selectbox(
+                        "Pretrained model name",
+                        ["cpsam_v2", "cyto3", "cyto2", "cyto", "nuclei", "cpdino"],
+                        help="Exact names available depend on your installed Cellpose version. "
+                        "'cpsam_v2' is the current default (Cellpose-SAM) model as of Cellpose >= 4.",
                     )
-                )
-                fig.update_layout(
-                    title="AP / Precision / Recall vs. IoU threshold", xaxis_title="IoU threshold", yaxis_title="Score"
-                )
-                st.plotly_chart(fig, width="stretch")
+                    custom_model_file = None
+                else:
+                    builtin_model_name = None
+                    custom_model_file = st.file_uploader("Cellpose model file (trained checkpoint)", key="cp_model_file")
+            with cp2:
+                diameter_px = st.number_input("Cell/dot diameter (px, 0 = auto-estimate)", 0.0, 500.0, 0.0, 1.0)
+                flow_threshold = st.slider("Flow threshold", 0.0, 3.0, 0.4, 0.05)
+                cellprob_threshold = st.slider("Cell probability threshold", -6.0, 6.0, 0.0, 0.5)
+                use_gpu = st.checkbox("Use GPU if available", value=False)
 
-                at_50 = eval_df[eval_df["iou_threshold"] == 0.5].iloc[0]
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("AP @ IoU 0.5", f"{at_50['AP']:.3f}")
-                m2.metric("Precision @ 0.5", f"{at_50['precision']:.3f}")
-                m3.metric("Recall @ 0.5", f"{at_50['recall']:.3f}")
-                m4.metric("Mean AP (0.5-0.95)", f"{eval_df['AP'].mean():.3f}")
+            if st.button("Run Cellpose segmentation on synthetic image"):
+                try:
+                    from cellpose import models as cellpose_models
+                except ImportError:
+                    st.error(
+                        "Cellpose is not installed in this environment. Install it with `pip install cellpose` "
+                        "(already listed in requirements.txt) to use in-app inference."
+                    )
+                else:
+                    if model_source == "Upload a custom-trained model" and custom_model_file is None:
+                        st.warning("Please upload a model file first.")
+                    else:
+                        with st.spinner("Running Cellpose inference -- this can take a while on CPU..."):
+                            try:
+                                if model_source == "Upload a custom-trained model":
+                                    tmp_dir = tempfile.mkdtemp(prefix="cellpose_model_")
+                                    tmp_path = os.path.join(tmp_dir, custom_model_file.name)
+                                    with open(tmp_path, "wb") as fh:
+                                        fh.write(custom_model_file.getvalue())
+                                    model = cellpose_models.CellposeModel(gpu=use_gpu, pretrained_model=tmp_path)
+                                else:
+                                    model = cellpose_models.CellposeModel(gpu=use_gpu, model_type=builtin_model_name)
+
+                                diam = None if diameter_px == 0 else float(diameter_px)
+                                masks_out, _flows_out, _styles_out = model.eval(
+                                    synth_raw,
+                                    diameter=diam,
+                                    flow_threshold=flow_threshold,
+                                    cellprob_threshold=cellprob_threshold,
+                                )
+                                cellpose_mask = np.asarray(masks_out).astype(np.int32)
+                                st.session_state["cellpose_pred_mask"] = cellpose_mask
+                                st.session_state["cellpose_pred_shape"] = cellpose_mask.shape
+                                st.success(f"Cellpose detected {int(cellpose_mask.max())} objects.")
+                            except Exception as exc:  # noqa: BLE001 -- surface any model/runtime error to the user
+                                st.error(f"Cellpose run failed: {exc}")
+
+            cached_pred = st.session_state.get("cellpose_pred_mask")
+            if cached_pred is not None and cached_pred.shape == synth_gt.shape:
+                pred_mask_for_eval = cached_pred
+                cp_overlay = label2rgb(
+                    pred_mask_for_eval, image=io_utils.normalize_for_display(synth_raw), bg_label=0, alpha=0.4
+                )
+                st.plotly_chart(
+                    px.imshow(cp_overlay, title=f"Cellpose prediction ({int(pred_mask_for_eval.max())} objects)"),
+                    width="stretch",
+                )
+            elif cached_pred is not None:
+                st.warning(
+                    f"Cached Cellpose prediction shape {cached_pred.shape} no longer matches the current synthetic "
+                    f"image shape {synth_gt.shape} -- re-run Cellpose above."
+                )
+
+        if pred_mask_for_eval is not None:
+            eval_df = synthetic.evaluate_against_ground_truth(synth_gt, pred_mask_for_eval)
+            st.dataframe(eval_df, width="stretch")
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=eval_df["iou_threshold"], y=eval_df["AP"], name="AP", mode="lines+markers"))
+            fig.add_trace(
+                go.Scatter(x=eval_df["iou_threshold"], y=eval_df["precision"], name="Precision", mode="lines+markers")
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=eval_df["iou_threshold"], y=eval_df["recall"], name="Recall (detection rate)", mode="lines+markers"
+                )
+            )
+            fig.update_layout(
+                title="AP / Precision / Recall vs. IoU threshold", xaxis_title="IoU threshold", yaxis_title="Score"
+            )
+            st.plotly_chart(fig, width="stretch")
+
+            at_50 = eval_df[eval_df["iou_threshold"] == 0.5].iloc[0]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("AP @ IoU 0.5", f"{at_50['AP']:.3f}")
+            m2.metric("Precision @ 0.5", f"{at_50['precision']:.3f}")
+            m3.metric("Recall @ 0.5", f"{at_50['recall']:.3f}")
+            m4.metric("Mean AP (0.5-0.95)", f"{eval_df['AP'].mean():.3f}")
 
 # ===========================================================================
 # TAB 5 -- Downstream Statistical & Replicate Consistency

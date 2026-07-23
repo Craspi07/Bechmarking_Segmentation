@@ -40,13 +40,21 @@ you to choose which app to launch.
    false-positive/false-negative annotation.
 2. **Morphological & Intensity Consistency** — per-object `regionprops`
    features, distribution plots, and automated flagging of likely merged
-   objects / split fragments based on population statistics.
+   objects / split fragments based on population statistics. An in-app
+   explainer covers what "Potential merge" / "Potential fragment" actually
+   mean, and an object inspector lets you pick any flagged label and see
+   exactly where it sits in the full image plus a zoomed, mask-overlaid crop.
 3. **SNR & Contrast Ratio Validation** — per-object signal-to-background and
-   signal-to-noise ratios from a local background ring, and how detection
-   confidence / area stability change with SNR.
+   signal-to-noise ratios from a local background ring, how detection
+   confidence / area stability change with SNR, and the same object
+   inspector to trace any object (defaulting to the lowest-SNR one) back to
+   its location on the raw image.
 4. **Synthetic Dot Simulation Benchmark** — generate a synthetic image with an
-   exact ground truth (Gaussian PSF blur + Poisson + Gaussian noise), then
-   evaluate an uploaded prediction against it (IoU, AP, detection rate).
+   exact ground truth (Gaussian PSF blur + Poisson + Gaussian noise),
+   downloadable as `.npy` or `.tif`. Evaluate it either by uploading an
+   externally-predicted mask, or by running Cellpose directly in-app (a
+   built-in pretrained model or your own uploaded trained model) for instant
+   IoU / AP / detection-rate QC against the exact ground truth.
 5. **Downstream Statistical & Replicate Consistency** — compare a second
    uploaded image pair against the primary one using spatial pseudo-replicate
    tiles, coefficient of variation, and Mann-Whitney U / Welch's t-test.
