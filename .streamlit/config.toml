@@ -1,0 +1,8 @@
+# Streamlit server configuration for this project.
+#
+# maxUploadSize raises the default 200 MB per-file upload cap. It applies to
+# every st.file_uploader in both app.py and app_advanced.py (raw images,
+# masks, and -- the reason for the higher value -- Cellpose model files,
+# which commonly run into the 1-2+ GB range).
+[server]
+maxUploadSize = 4096

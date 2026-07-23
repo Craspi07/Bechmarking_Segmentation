@@ -25,6 +25,13 @@ Double-click **`run_app.bat`** (or run it from a command prompt). It creates/
 reuses a `.venv` virtual environment, installs `requirements.txt`, then prompts
 you to choose which app to launch.
 
+### Upload size limit
+
+`.streamlit/config.toml` raises Streamlit's default 200 MB per-file upload cap
+to 4096 MB (4 GB), since a trained Cellpose model file can easily be 1-2+ GB.
+This applies to every uploader in both apps. If you need an even higher
+ceiling, edit `maxUploadSize` in that file (value is in megabytes).
+
 ## Input data
 
 - **Raw fluorescence image** — TIFF (single-channel, multi-channel, or z-stack).
