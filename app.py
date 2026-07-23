@@ -90,6 +90,67 @@ def _tiff_bytes(array: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
+def render_flag_overlay(raw_img_local, mask_img_local, flagged_df_local):
+    """Whole-image overlay showing every detected object at once, colored
+    by its outlier flag -- the "big picture" view of where problems cluster,
+    complementing the single-object inspector below it.
+    """
+    if raw_img_local is not None:
+        base = io_utils.normalize_for_display(raw_img_local)
+    else:
+        base = np.where(mask_img_local > 0, 255, 0).astype(np.uint8)
+    rgb = np.repeat(base[:, :, None], 3, axis=2).astype(np.float64)
+
+    color_map = {"OK": (0, 200, 0), "Potential fragment": (255, 165, 0), "Potential merge": (255, 0, 0)}
+    alpha = 0.45
+    for flag_name, color in color_map.items():
+        labels_for_flag = flagged_df_local.loc[flagged_df_local["flag"] == flag_name, "label"].astype(int).to_numpy()
+        if labels_for_flag.size == 0:
+            continue
+        flag_mask = np.isin(mask_img_local, labels_for_flag)
+        for c in range(3):
+            rgb[:, :, c] = np.where(flag_mask, rgb[:, :, c] * (1 - alpha) + color[c] * alpha, rgb[:, :, c])
+
+    fig = px.imshow(rgb.astype(np.uint8), title="All objects, colored by outlier flag")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("🟢 OK &nbsp;&nbsp; 🟠 Potential fragment &nbsp;&nbsp; 🔴 Potential merge", unsafe_allow_html=True)
+
+
+def render_snr_overlay(raw_img_local, mask_img_local, snr_df_local):
+    """Whole-image overview marking every object's centroid, colored by its
+    SNR value -- lets you spot at a glance where low-confidence detections
+    cluster before drilling into any single object.
+    """
+    centroids = {p.label: p.centroid for p in regionprops(mask_img_local.astype(np.int32))}
+    labels = [l for l in snr_df_local["label"] if l in centroids]
+    if not labels:
+        return
+    xs = [centroids[l][1] for l in labels]
+    ys = [centroids[l][0] for l in labels]
+    snr_values = snr_df_local.set_index("label").loc[labels, "SNR"]
+
+    fig = px.imshow(io_utils.normalize_for_display(raw_img_local), color_continuous_scale="gray", title="All objects, colored by SNR")
+    fig.update_coloraxes(showscale=False)
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="markers",
+            marker=dict(
+                size=10,
+                color=snr_values,
+                colorscale="RdYlGn",
+                showscale=True,
+                colorbar=dict(title="SNR"),
+                line=dict(width=1, color="black"),
+            ),
+            text=[f"label {l}, SNR={s:.2f}" for l, s in zip(labels, snr_values)],
+            name="objects",
+        )
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
 def render_object_inspector(raw_img_local, mask_img_local, df, key_prefix, default_label=None):
     """Let the user pick an object label from ``df`` and see exactly where
     it sits in the full image, plus a zoomed, mask-overlaid crop -- so a
@@ -373,6 +434,9 @@ statistics alone can't tell these three apart.
                     "text/csv",
                 )
 
+            st.subheader("Full image overview")
+            render_flag_overlay(raw_img, mask_img, flagged_df)
+
             st.subheader("Trace an object back to the original image")
             default_lbl = int(suspicious["label"].iloc[0]) if not suspicious.empty else int(flagged_df["label"].iloc[0])
             render_object_inspector(raw_img, mask_img, flagged_df, "tab2", default_label=default_lbl)
@@ -392,6 +456,9 @@ with tab3:
         else:
             st.subheader("Per-object SBR / SNR table")
             st.dataframe(snr_df, width="stretch")
+
+            st.subheader("Full image overview")
+            render_snr_overlay(raw_img, mask_img, snr_df)
 
             st.subheader("Trace an object back to the original image")
             valid_snr = snr_df.dropna(subset=["SNR"])
