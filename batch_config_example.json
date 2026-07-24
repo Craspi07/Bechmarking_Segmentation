@@ -1,0 +1,31 @@
+{
+  "output_dir": "batch_benchmark_results",
+  "grid": {
+    "poisson_scales": [0.5, 1.0, 2.0, 5.0],
+    "gaussian_sigmas": [2, 5, 10, 20],
+    "radius_means": [3, 5, 8],
+    "radius_stds": [1.0, 1.5]
+  },
+  "image": {
+    "height": 512,
+    "width": 512,
+    "n_dots": 150,
+    "blur_sigma": 1.2
+  },
+  "n_replicates": 3,
+  "iou_thresholds": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
+  "seed": 0,
+  "models": {
+    "custom": {"pretrained_model": "path/to/your_custom_model.pth"},
+    "native": {"pretrained_model": "cpsam_v2"}
+  },
+  "run_custom": true,
+  "run_native": true,
+  "cellpose_eval": {
+    "diameter": null,
+    "flow_threshold": 0.4,
+    "cellprob_threshold": 0.0,
+    "gpu": false
+  },
+  "save_images": false
+}

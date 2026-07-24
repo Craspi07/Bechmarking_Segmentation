@@ -1,13 +1,18 @@
 # Segmentation QC Benchmark
 
-Two companion Streamlit apps for benchmarking cell/particle instance-segmentation
-quality **without a full manual ground-truth dataset**:
+Two companion Streamlit apps plus a standalone batch CLI tool for benchmarking
+cell/particle instance-segmentation quality **without a full manual
+ground-truth dataset**:
 
 - **`app.py`** — basic benchmark: crop/count spot-checks, morphology QC,
   SNR/contrast validation, synthetic dot simulation, replicate consistency.
 - **`app_advanced.py`** — advanced benchmark: consensus/STAPLE ensemble voting,
   perturbation/metamorphic stability, unsupervised boundary & homogeneity
   quality scoring, and a Reverse Classification Accuracy (RCA) proxy.
+- **`batch_synthetic_benchmark.py`** — standalone (no Streamlit) CLI tool that
+  sweeps synthetic dot generation across noise/size parameters and compares a
+  custom-trained Cellpose model against the native pretrained model; see
+  [Batch benchmarking](#batch-benchmarking-no-streamlit) below.
 
 ## Setup
 
@@ -87,11 +92,55 @@ ceiling, edit `maxUploadSize` in that file (value is in megabytes).
    cross-validated ROC-AUC / PR-AUC as a proxy for how cleanly separable
    (and thus how consistent) the segmentation is.
 
+## Batch benchmarking (no Streamlit)
+
+`batch_synthetic_benchmark.py` is a plain command-line tool for larger,
+unattended comparisons -- it doesn't start a server or a browser. It sweeps
+Tab 4's synthetic dot generator (PSF blur + Poisson + Gaussian noise) across a
+grid of noise levels and dot-size distributions, runs **both** a custom
+Cellpose model and Cellpose's native pretrained model on every generated
+image, evaluates each against the exact synthetic ground truth (IoU / AP /
+precision / recall at COCO-style IoU thresholds 0.5-0.95), and writes:
+
+- `results_raw.csv` — one row per (image, model, IoU threshold)
+- `results_summary.csv` — the same, aggregated across replicate images
+- `report.html` — a self-contained, interactive Plotly report: overall
+  custom-vs-native comparison, the AP-vs-IoU-threshold curve, AP vs. each
+  swept parameter (Poisson scale, Gaussian sigma, dot radius), a per-model
+  AP@0.5 noise-sensitivity heatmap, and a per-image head-to-head scatter
+
+```bash
+# Quick sweep via CLI flags
+python batch_synthetic_benchmark.py --custom-model path/to/your_model.pth
+
+# Preview the grid size (how many evaluations) without running anything
+python batch_synthetic_benchmark.py --custom-model path/to/your_model.pth --print-grid
+
+# Full control via a JSON config (see batch_config_example.json)
+python batch_synthetic_benchmark.py --config batch_config_example.json
+```
+
+Run `python batch_synthetic_benchmark.py --help` for the full flag list
+(noise/size grids, replicate count, image size, Cellpose eval parameters,
+`--gpu`, `--save-images` to also dump each synthetic raw/ground-truth pair,
+`--skip-custom`/`--skip-native` to run just one model). Model loading reuses
+the same GPU-diagnostic logic as the Streamlit apps: it prints the actual
+resolved device and warns if `--gpu` was requested but PyTorch couldn't find
+a usable GPU.
+
+On Windows, run it through the same venv `run_app.bat` sets up, calling the
+venv's `python.exe` directly (as `run_app.bat` itself does) rather than a
+bare `python`/`pip` command, to sidestep any broken launcher-stub issues:
+`.venv\Scripts\python.exe batch_synthetic_benchmark.py --custom-model
+path\to\your_model.pth`.
+
 ## Project layout
 
 ```
 app.py                    Basic benchmark: Streamlit UI and tab wiring
 app_advanced.py            Advanced benchmark: Streamlit UI and tab wiring
+batch_synthetic_benchmark.py Standalone CLI: noise/size sweep, custom vs native Cellpose, HTML report
+batch_config_example.json     Example JSON sweep config for the batch CLI tool
 run_app.bat                 Windows setup + launcher (choose which app to run)
 modules/
   io_utils.py                Loading TIFF/.npy, display normalization
